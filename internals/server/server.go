@@ -4,35 +4,44 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type Server struct {
 	port            int
 	shutdownTimeout time.Duration
+	DB              *pgxpool.Pool
 }
 
-func New(port int, shutdownTimeout time.Duration) *Server {
+func New(port int, shutdownTimeout time.Duration, db *pgxpool.Pool) *Server {
 	return &Server{
 		port:            port,
 		shutdownTimeout: shutdownTimeout,
+		DB:              db,
 	}
 }
 
 func (s *Server) Serve() error {
-	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", s.port),
-		Handler:      s.Routes(),
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%d", s.port),
+		Handler:           s.Routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       5 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		BaseContext:       func(l net.Listener) context.Context { return ctx },
+		ErrorLog:          log.New(os.Stderr, "http: ", log.LstdFlags),
+	}
 
 	errorCh := make(chan error, 1)
 	go func() {
@@ -53,6 +62,11 @@ func (s *Server) Serve() error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("server shutdown error: %w", err)
 		}
+
+		if s.DB != nil {
+			s.DB.Close()
+		}
+
 		return nil
 	case err := <-errorCh:
 		if err != nil {
